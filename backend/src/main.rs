@@ -2,7 +2,8 @@ use actix_web::{web, App, HttpServer, Responder};
 use sqlx::{PgPool, Pool, Postgres};
 mod config {pub mod db;}
 use std::sync::Arc;
-
+use actix::prelude::*;
+use std::time::Duration;
 
 // async fn index() -> impl Responder {
 //     "DHT Application"
@@ -24,7 +25,8 @@ use std::sync::Arc;
 
 use actix::Actor;
 mod nodes;
-use nodes::{Node, JoinMessage, StabilizeMessage, FixFingersMessage, LookupMessage};
+use nodes::node_actor::{Node, JoinMessage, StabilizeMessage, FixFingersMessage, LookupMessage, HealthCheck, FingerTableUpdate};
+
 
 #[actix_web::main]
 // async fn main() {
@@ -43,27 +45,56 @@ use nodes::{Node, JoinMessage, StabilizeMessage, FixFingersMessage, LookupMessag
 //     println!("Lookup result for key 3: {:?}", lookup_result);
 // }
 
+// async fn main() -> std::io::Result<()> {
+//     // Initialize the database pool
+//     let pool = config::db::create_pool().await;
+
+//     // Create instances of Node with the PgPool passed in
+//     let node1 = Node::new(1, "127.0.0.1".to_string(), 5080, pool.clone()).start();
+//     let node2 = Node::new(2, "127.0.0.1".to_string(), 5081, pool.clone()).start();
+//     let node3 = Node::new(3, "127.0.0.1".to_string(), 5082, pool.clone()).start();
+
+//     // Simulate joining and stabilization
+//     let _ = node1.send(JoinMessage { node_id: 2 }).await;
+//     let _ = node2.send(JoinMessage { node_id: 3 }).await;
+//     let _ = node3.send(JoinMessage { node_id: 1 }).await;
+
+//     // Set up the Actix Web server (optional, for API endpoints)
+//     HttpServer::new(move || {
+//         App::new()
+//             .app_data(web::Data::new(pool.clone())) // Pass the database pool to the app
+//             // Add routes here for interacting with nodes, if needed
+//     })
+//     .bind("127.0.0.1:5080")?
+//     .run()
+//     .await
+// }
 async fn main() -> std::io::Result<()> {
-    // Initialize the database pool
     let pool = config::db::create_pool().await;
 
-    // Create instances of Node with the PgPool passed in
     let node1 = Node::new(1, "127.0.0.1".to_string(), 5080, pool.clone()).start();
     let node2 = Node::new(2, "127.0.0.1".to_string(), 5081, pool.clone()).start();
     let node3 = Node::new(3, "127.0.0.1".to_string(), 5082, pool.clone()).start();
 
-    // Simulate joining and stabilization
-    let _ = node1.send(JoinMessage { node_id: 2 }).await;
-    let _ = node2.send(JoinMessage { node_id: 3 }).await;
-    let _ = node3.send(JoinMessage { node_id: 1 }).await;
+    node1.do_send(HealthCheck);
+    node2.do_send(HealthCheck);
+    node3.do_send(HealthCheck);
 
-    // Set up the Actix Web server (optional, for API endpoints)
+    // Set up finger table updates
+    node1.do_send(FingerTableUpdate);
+    node2.do_send(FingerTableUpdate);
+    node3.do_send(FingerTableUpdate);
+
     HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(pool.clone())) // Pass the database pool to the app
-            // Add routes here for interacting with nodes, if needed
+            .app_data(web::Data::new(pool.clone()))
     })
     .bind("127.0.0.1:5080")?
     .run()
     .await
+}
+
+async fn schedule_health_checks(node: Addr<Node>) {
+    node.do_send(HealthCheck);
+    actix::clock::sleep(Duration::from_secs(10)).await; // Repeat every 10 seconds
 }
