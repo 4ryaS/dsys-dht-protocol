@@ -1,24 +1,43 @@
+use actix_web::{web, App, HttpServer, Responder};
+use actix::spawn;
 use actix::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use sqlx::{PgPool, Error};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone)]
 pub struct Node {
     pub id: i32,
     pub address: String,
     pub port: i32,
     pub predecessor: Option<i32>,
-    pub fingers: HashMap<i32, i32>, // Maps finger index to node ID
+    pub fingers: HashMap<i32, i32>,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub db_pool: PgPool, // Add PgPool here
 }
 
+// impl Default for Node {
+//     fn default() -> Self {
+//         Node {
+//             id: 0,
+//             address: String::new(),
+//             port: 0,
+//             predecessor: None,
+//             fingers: HashMap::new(),
+//             db_pool: PgPool::new(), // Provide a valid default or remove `Default` where not necessary
+//         }
+//     }
+// }
+
 impl Node {
-    pub fn new(id: i32, address: String, port: i32) -> Self {
+    pub fn new(id: i32, address: String, port: i32, db_pool: PgPool) -> Self {
         Node {
             id,
             address,
             port,
             predecessor: None,
             fingers: HashMap::new(),
+            db_pool,
         }
     }
 
@@ -72,23 +91,59 @@ impl Actor for Node {
 }
 
 // Handler for JoinMessage
+// impl Handler<JoinMessage> for Node {
+//     type Result = ();
+
+//     fn handle(&mut self, msg: JoinMessage, ctx: &mut Self::Context) {
+//         if self.predecessor.is_none() {
+//             // If the node is alone, it points to itself as predecessor and successor
+//             self.predecessor = Some(self.id);
+//             println!("Node {} joined as the first node in the DHT.", self.id);
+//         } else {
+//             // The new node will attempt to find its place in the ring
+//             println!("Node {} joining DHT, notifying predecessor.", msg.node_id);
+//             let successor_id = self.fingers.get(&0).cloned().unwrap_or(self.id);
+            
+//             // Send a message to the successor node for further integration
+//             let successor_addr = ctx.address().clone();
+//             successor_addr.do_send(NotifyJoin { new_node_id: msg.node_id });
+//         }
+//     }
+// }
+
+// impl Handler<JoinMessage> for Node {
+//     type Result = ();
+
+//     fn handle(&mut self, msg: JoinMessage, ctx: &mut Self::Context) {
+//         if self.predecessor.is_none() {
+//             // If the node is alone, it points to itself as predecessor and successor
+//             self.predecessor = Some(self.id);
+//             println!("Node {} joined as the first node in the DHT.", self.id);
+//         } else {
+//             // Try to notify the predecessor node
+//             println!("Node {} attempting to join the DHT.", msg.node_id);
+//             let successor_id = self.fingers.get(&0).cloned().unwrap_or(self.id);
+
+//             // Send a message to successor and handle possible errors
+//             let result = ctx.address().try_send(NotifyJoin { new_node_id: msg.node_id });
+//             match result {
+//                 Ok(_) => println!("Node {} notified its successor successfully.", self.id),
+//                 Err(e) => println!("Node {} failed to notify successor: {:?}", self.id, e),
+//             }
+//         }
+//     }
+// }
 impl Handler<JoinMessage> for Node {
     type Result = ();
 
-    fn handle(&mut self, msg: JoinMessage, ctx: &mut Self::Context) {
-        if self.predecessor.is_none() {
-            // If the node is alone, it points to itself as predecessor and successor
-            self.predecessor = Some(self.id);
-            println!("Node {} joined as the first node in the DHT.", self.id);
-        } else {
-            // The new node will attempt to find its place in the ring
-            println!("Node {} joining DHT, notifying predecessor.", msg.node_id);
-            let successor_id = self.fingers.get(&0).cloned().unwrap_or(self.id);
-            
-            // Send a message to the successor node for further integration
-            let successor_addr = ctx.address().clone();
-            successor_addr.do_send(NotifyJoin { new_node_id: msg.node_id });
-        }
+    fn handle(&mut self, msg: JoinMessage, _: &mut Self::Context) {
+        // Use self.db_pool to access the database
+        async move {
+            match insert_node(&self.db_pool, self).await {
+                Ok(_) => println!("Node {} joined the DHT and stored in database.", self.id),
+                Err(e) => println!("Node {} failed to store in database: {:?}", self.id, e),
+            }
+        };
     }
 }
 
@@ -103,19 +158,39 @@ impl Handler<NotifyJoin> for Node {
 }
 
 // Handler for StabilizeMessage
+// impl Handler<StabilizeMessage> for Node {
+//     type Result = ();
+
+//     fn handle(&mut self, _: StabilizeMessage, ctx: &mut Self::Context) {
+//         if let Some(predecessor_id) = self.predecessor {
+//             println!("Node {} stabilizing. Current predecessor: {}", self.id, predecessor_id);
+//             if self.id == predecessor_id {
+//                 // This node has no predecessor; point to itself
+//                 self.predecessor = Some(self.id);
+//             } else {
+//                 // Request predecessor to verify or update the successor
+//                 let predecessor_addr = ctx.address().clone();
+//                 predecessor_addr.do_send(UpdateSuccessor { new_successor_id: self.id });
+//             }
+//         }
+//     }
+// }
 impl Handler<StabilizeMessage> for Node {
     type Result = ();
 
     fn handle(&mut self, _: StabilizeMessage, ctx: &mut Self::Context) {
         if let Some(predecessor_id) = self.predecessor {
-            println!("Node {} stabilizing. Current predecessor: {}", self.id, predecessor_id);
+            println!("Node {} stabilizing with predecessor {}", self.id, predecessor_id);
             if self.id == predecessor_id {
                 // This node has no predecessor; point to itself
                 self.predecessor = Some(self.id);
             } else {
-                // Request predecessor to verify or update the successor
-                let predecessor_addr = ctx.address().clone();
-                predecessor_addr.do_send(UpdateSuccessor { new_successor_id: self.id });
+                // Attempt to update the successor
+                let result = ctx.address().try_send(UpdateSuccessor { new_successor_id: self.id });
+                match result {
+                    Ok(_) => println!("Node {} updated its successor successfully.", self.id),
+                    Err(e) => println!("Node {} failed to update successor: {:?}", self.id, e),
+                }
             }
         }
     }
@@ -160,3 +235,40 @@ impl Handler<LookupMessage> for Node {
         }
     }
 } 
+
+
+pub async fn insert_node(pool: &PgPool, node: &Node) -> Result<(), Error> {
+    sqlx::query!(
+        "INSERT INTO nodes (id, address, port, predecessor) VALUES ($1, $2, $3, $4)",
+        node.id as i32,
+        node.address,
+        node.port as i32,
+        node.predecessor as Option<i32>
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn update_predecessor(pool: &PgPool, node_id: i32, predecessor: i32) -> Result<(), Error> {
+    sqlx::query!(
+        "UPDATE nodes SET predecessor = $1 WHERE id = $2",
+        predecessor as i32,
+        node_id as i32
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn insert_key_value(pool: &PgPool, key: i32, value: String, node_id: i32) -> Result<(), Error> {
+    sqlx::query!(
+        "INSERT INTO key_values (key, value, node_id) VALUES ($1, $2, $3)",
+        key as i32,
+        value,
+        node_id as i32
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
