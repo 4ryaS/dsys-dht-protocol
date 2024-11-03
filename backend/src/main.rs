@@ -19,10 +19,12 @@ mod config { pub mod db; }
 mod nodes;
 use nodes::node_actor::{Node, JoinMessage, StabilizeMessage, FixFingersMessage, InsertKeyValue, GetKeyValue, DeleteKeyValue, ReplicateData, HealthCheck, TransferData, KeyValue, NodeRecord};
 
-// #[derive(Deserialize)]
-// struct KeyValuePayload {
-//     value: String,
-// }
+
+
+#[derive(Deserialize)]
+struct KeyValuePayload {
+    value: String,
+}
 
 // // Handler for the index route to verify the server is running
 // async fn index() -> impl Responder {
@@ -253,16 +255,23 @@ async fn list_nodes(pool: web::Data<PgPool>) -> impl Responder {
 async fn add_key(
     node: web::Data<Addr<Node>>,
     path: web::Path<i32>,
-    payload: web::Json<KeyValue>,
+    payload: web::Json<KeyValuePayload>,
 ) -> impl Responder {
     let key = path.into_inner();
     let value = payload.value.clone();
+
+    // Send the InsertKeyValue message to the Node actor
     let result = node.send(InsertKeyValue { key, value }).await;
     match result {
         Ok(Ok(())) => HttpResponse::Ok().json("Key added"),
-        _ => HttpResponse::InternalServerError().body("Failed to add key"),
+        Ok(Err(e)) => {
+            eprintln!("Database error: {:?}", e);
+            HttpResponse::InternalServerError().body("Failed to add key to database")
+        }
+        Err(_) => HttpResponse::InternalServerError().body("Failed to communicate with the node"),
     }
 }
+
 
 async fn get_key(node: web::Data<Addr<Node>>, path: web::Path<i32>) -> impl Responder {
     let key = path.into_inner();
