@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DHT Visualization</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+
+        socket.on('update', (data) => {
+            console.log('Update received:', data);
+            // You can dynamically update the page here based on received updates
+        });
+    </script>
+</head>
+<body>
+    <h1>Distributed Hash Table Visualization</h1>
+    <div id="nodes">
+        <% nodes.forEach(node => { %>
+            <div class="node">
+                <h3>Node <%= node.id %></h3>
+                <p>Address: <%= node.address %></p>
+                <p>Port: <%= node.port %></p>
+            </div>
+        <% }) %>
+    </div>
+
+    <h2>Add Key-Value Pair</h2>
+    <form id="add-key-value" action="/add" method="POST">
+        <input type="text" name="key" placeholder="Key" required>
+        <input type="text" name="value" placeholder="Value" required>
+        <button type="submit">Add</button>
+    </form>
+</body>
+</html>

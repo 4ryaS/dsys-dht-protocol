@@ -3,7 +3,7 @@ use actix::spawn;
 use actix::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use sqlx::{PgPool, Error};
+use sqlx::{PgPool, Error, query};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
@@ -17,6 +17,14 @@ pub struct Node {
     pub fingers: HashMap<i32, i32>,
     #[serde(skip_serializing, skip_deserializing)]
     pub db_pool: PgPool, // Add PgPool here
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct NodeRecord {
+    pub id: i64,
+    pub address: String,
+    pub port: i64,
+    pub predecessor: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -40,6 +48,21 @@ pub struct KeyValue {
 
 impl Node {
     pub fn new(id: i32, address: String, port: i32, db_pool: PgPool) -> Self {
+        // Insert the node into the nodes table
+        let pool = db_pool.clone();
+        let address_clone = address.clone();
+        actix::spawn(async move {
+            query!(
+                "INSERT INTO nodes (id, address, port) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                id as i32,
+                address_clone,
+                port as i32
+            )
+            .execute(&pool)
+            .await
+            .expect("Failed to insert node into nodes table");
+        });
+
         Node {
             id,
             address,
@@ -164,13 +187,51 @@ impl Handler<JoinMessage> for Node {
     type Result = ();
 
     fn handle(&mut self, msg: JoinMessage, _: &mut Self::Context) {
-        // Use self.db_pool to access the database
-        async move {
-            match insert_node(&self.db_pool, self).await {
-                Ok(_) => println!("Node {} joined the DHT and stored in database.", self.id),
-                Err(e) => println!("Node {} failed to store in database: {:?}", self.id, e),
+        let pool = self.db_pool.clone();
+        let node_id = msg.node_id;
+        let address = self.address.clone();
+        let port = self.port;
+
+        actix::spawn(async move {
+            // Step 1: Find the closest predecessor in the database
+            let closest_predecessor = sqlx::query!(
+                "SELECT id FROM nodes WHERE id < $1 ORDER BY id DESC LIMIT 1",
+                node_id as i32
+            )
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten()
+            .map(|record| record.id);
+
+            // Step 2: Set the predecessor for the new node
+            let predecessor_id = closest_predecessor;
+            match sqlx::query!(
+                "INSERT INTO nodes (id, address, port, predecessor) VALUES ($1, $2, $3, $4)
+                ON CONFLICT (id) DO UPDATE SET predecessor = $4",
+                node_id as i32,
+                address,
+                port as i32,
+                predecessor_id
+            )
+            .execute(&pool)
+            .await
+            {
+                Ok(_) => println!("Node {} joined the DHT with predecessor {:?}", node_id, predecessor_id),
+                Err(e) => println!("Failed to insert or update node {} in database: {:?}", node_id, e),
             }
-        };
+
+            // Step 3: Optional - Update the successor of the predecessor if needed
+            if let Some(pred_id) = predecessor_id {
+                let _ = sqlx::query!(
+                    "UPDATE nodes SET successor = $1 WHERE id = $2",
+                    node_id as i32,
+                    pred_id
+                )
+                .execute(&pool)
+                .await;
+            }
+        });
     }
 }
 
@@ -475,7 +536,7 @@ impl Handler<HealthCheck> for Node {
 }
 
 
-#[derive(Message)]
+#[derive(Message, Deserialize, Serialize)]
 #[rtype(result = "Result<(), sqlx::Error>")]
 pub struct ReplicateData {
     pub key: i32,
